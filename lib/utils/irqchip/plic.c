@@ -23,6 +23,12 @@
 #define PLIC_ENABLE_STRIDE 0x80
 #define PLIC_CONTEXT_BASE 0x200000
 #define PLIC_CONTEXT_STRIDE 0x1000
+#define PLIC_CONTEXT_CLAIM 0x4
+
+/* Custom extensions for secure/non-secure split (QEMU Nanhu PLIC) */
+#define PLIC_SEC_SRC_BASE 0x10000
+#define PLIC_WORLD_STATE_BASE 0x11000
+#define PLIC_WORLD_STATE_STRIDE 0x4
 
 static u32 plic_get_priority(const struct plic_data *plic, u32 source)
 {
@@ -31,7 +37,7 @@ static u32 plic_get_priority(const struct plic_data *plic, u32 source)
 	return readl(plic_priority);
 }
 
-static void plic_set_priority(const struct plic_data *plic, u32 source, u32 val)
+void plic_set_priority(const struct plic_data *plic, u32 source, u32 val)
 {
 	volatile void *plic_priority = (char *)plic->addr +
 			PLIC_PRIORITY_BASE + 4 * source;
@@ -140,6 +146,14 @@ int plic_context_init(const struct plic_data *plic, int context_id,
 	return 0;
 }
 
+void plic_set_threshold(const struct plic_data *plic, u32 context_id, u32 val)
+{
+	if (!plic)
+		return;
+
+	plic_set_thresh(plic, context_id, val);
+}
+
 int plic_warm_irqchip_init(const struct plic_data *plic,
 			   int m_cntx_id, int s_cntx_id)
 {
@@ -176,4 +190,111 @@ int plic_cold_irqchip_init(const struct plic_data *plic)
 	return sbi_domain_root_add_memrange(plic->addr, plic->size, BIT(20),
 					(SBI_DOMAIN_MEMREGION_MMIO |
 					 SBI_DOMAIN_MEMREGION_SHARED_SURW_MRW));
+}
+
+u32 plic_claim(const struct plic_data *plic, u32 context_id)
+{
+	volatile void *plic_claim;
+
+	if (!plic)
+		return 0;
+
+	plic_claim = (char *)plic->addr + PLIC_CONTEXT_BASE +
+		     PLIC_CONTEXT_STRIDE * context_id + PLIC_CONTEXT_CLAIM;
+	return readl(plic_claim);
+}
+
+void plic_complete(const struct plic_data *plic, u32 context_id, u32 irq)
+{
+	volatile void *plic_claim;
+
+	if (!plic)
+		return;
+
+	plic_claim = (char *)plic->addr + PLIC_CONTEXT_BASE +
+		     PLIC_CONTEXT_STRIDE * context_id + PLIC_CONTEXT_CLAIM;
+	writel(irq, plic_claim);
+}
+
+void plic_enable_irq(const struct plic_data *plic, u32 context_id,
+		     u32 irq, bool enable)
+{
+	u32 word_index, bit_index, val;
+	volatile void *plic_ie;
+
+	if (!plic || irq == 0 || irq > plic->num_src)
+		return;
+
+	word_index = irq / 32;
+	bit_index = irq % 32;
+
+	plic_ie = (char *)plic->addr + PLIC_ENABLE_BASE +
+		  PLIC_ENABLE_STRIDE * context_id + 4 * word_index;
+
+	val = readl(plic_ie);
+	if (enable)
+		val |= BIT(bit_index);
+	else
+		val &= ~BIT(bit_index);
+
+	writel(val, plic_ie);
+}
+
+bool plic_get_sec_src(const struct plic_data *plic, u32 irq)
+{
+	u32 word_index, bit_index;
+	volatile void *sec_src_reg;
+
+	if (!plic || irq > plic->num_src)
+		return false;
+
+	word_index = irq / 32;
+	bit_index = irq % 32;
+	sec_src_reg = (char *)plic->addr + PLIC_SEC_SRC_BASE + 4 * word_index;
+
+	return !!(readl(sec_src_reg) & BIT(bit_index));
+}
+
+void plic_set_sec_src(const struct plic_data *plic, u32 irq, bool secure)
+{
+	u32 word_index, bit_index, val;
+	volatile void *sec_src_reg;
+
+	if (!plic || irq == 0 || irq > plic->num_src)
+		return;
+
+	word_index = irq / 32;
+	bit_index = irq % 32;
+	sec_src_reg = (char *)plic->addr + PLIC_SEC_SRC_BASE + 4 * word_index;
+
+	val = readl(sec_src_reg);
+	if (secure)
+		val |= BIT(bit_index);
+	else
+		val &= ~BIT(bit_index);
+	writel(val, sec_src_reg);
+}
+
+u32 plic_get_world_state(const struct plic_data *plic, u32 context_id)
+{
+	volatile void *ws_reg;
+
+	if (!plic)
+		return 0;
+
+	ws_reg = (char *)plic->addr + PLIC_WORLD_STATE_BASE +
+		 PLIC_WORLD_STATE_STRIDE * context_id;
+	return readl(ws_reg) & 0x1;
+}
+
+void plic_set_world_state(const struct plic_data *plic, u32 context_id, u32 ws)
+{
+	volatile void *ws_reg;
+
+	if (!plic)
+		return;
+
+	ws_reg = (char *)plic->addr + PLIC_WORLD_STATE_BASE +
+		 PLIC_WORLD_STATE_STRIDE * context_id;
+	writel(ws & 0x1, ws_reg);
 }

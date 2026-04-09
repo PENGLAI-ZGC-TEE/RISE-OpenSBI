@@ -30,4 +30,7 @@ void fdt_plic_context_restore(bool smode, const u32 *enable, u32 threshold,
 
 void thead_plic_restore(void);
 
+/* Complete pending secure IRQ after returning from TEE */
+void fdt_plic_secure_irq_complete(void);
+
 #endif

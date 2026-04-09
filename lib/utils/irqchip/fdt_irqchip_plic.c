@@ -15,9 +15,11 @@
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_heap.h>
 #include <sbi/sbi_irqchip.h>
+#include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_scratch.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/irqchip/fdt_irqchip.h>
+#include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
 #include <sbi_utils/irqchip/plic.h>
 
 static unsigned long plic_ptr_offset;
@@ -50,6 +52,7 @@ struct plic_sec_irq_record {
 	u32 ws;
 	u32 mctx;
 	u32 hartid;
+	u32 pending;
 	u64 count;
 };
 
@@ -62,6 +65,18 @@ struct plic_secure_cfg {
 
 static struct plic_secure_cfg plic_secure_cfg;
 
+static void plic_sec_dump_record(const char *tag,
+				    const struct plic_sec_irq_record *rec)
+{
+	if (!rec)
+		return;
+
+	sbi_printf("plic-sec: %s irq=%u pending=%u count=%llu ws=%u sec=%u mctx=%u hart=%u\n",
+		   tag, rec->irq, rec->pending,
+		   (unsigned long long)rec->count, rec->ws, rec->sec,
+		   rec->mctx, rec->hartid);
+}
+
 static int plic_secure_irqfn(void)
 {
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
@@ -70,7 +85,9 @@ static int plic_secure_irqfn(void)
 	u32 irq, ws, sec;
 	u32 hartid = current_hartid();
 	u32 hartindex = sbi_hartid_to_hartindex(hartid);
-	struct plic_sec_irq_record *rec;
+	struct plic_sec_irq_record *rec = NULL;
+	unsigned long fiq_entry;
+	struct sbi_domain *tdomain;
 
 	if (!plic || mctx < 0)
 		return SBI_ENODEV;
@@ -89,22 +106,69 @@ static int plic_secure_irqfn(void)
 		rec->ws = ws;
 		rec->mctx = mctx;
 		rec->hartid = hartid;
+		rec->pending = 1;
 		rec->count++;
 		sbi_printf("plic-sec: hart%u mctx=%u irq=%u sec=%u ws=%u count=%llu\n",
 			   rec->hartid, rec->mctx, rec->irq, rec->sec, rec->ws,
 			   (unsigned long long)rec->count);
-
-		/* Avoid interrupt storm: mask this secure IRQ after first log */
-		if (rec->count == 1) {
-			plic_enable_irq(plic, mctx, irq, false);
-			sbi_printf("plic-sec: masked secure irq %u on mctx=%ld to stop storm\n",
-				   irq, mctx);
-		}
 	}
 
-	/* Complete immediately; no TEE entry in this phase */
-	plic_complete(plic, mctx, irq);
-	return sec ? 0 : SBI_ENOENT;
+	if (!sec) {
+		sbi_printf("plic-sec: irq=%u not marked secure (ws=%u) -> complete\n",
+			   irq, ws);
+		plic_complete(plic, mctx, irq);
+		return SBI_ENOENT;
+	}
+
+	tdomain = opteed_get_tdomain();
+	fiq_entry = opteed_get_fiq_entry();
+	if (!tdomain || !fiq_entry) {
+		sbi_printf("plic-sec: OP-TEE not ready, complete irq=%u\n", irq);
+		if (rec)
+			rec->pending = 0;
+		plic_complete(plic, mctx, irq);
+		return 0;
+	}
+
+	sbi_printf("plic-sec: enter tee fiq irq=%u entry=0x%lx\n",
+		   irq, fiq_entry);
+	sbi_domain_context_set_mepc(tdomain, fiq_entry);
+	sbi_domain_context_enter(tdomain);
+	if (rec)
+		plic_sec_dump_record("exit tee call", rec);
+
+	return 0;
+}
+
+void fdt_plic_secure_irq_complete(void)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct plic_data *plic = plic_get_hart_data_ptr(scratch);
+	long mctx = plic_get_hart_mcontext(scratch);
+	u32 hartid = current_hartid();
+	u32 hartindex = sbi_hartid_to_hartindex(hartid);
+	struct plic_sec_irq_record *rec;
+
+	if (!plic || mctx < 0 || hartindex >= SBI_HARTMASK_MAX_BITS)
+		return;
+
+	rec = &sec_irq_records[hartindex];
+	if (!rec->pending) {
+		plic_sec_dump_record("complete called but not pending", rec);
+		return;
+	}
+
+	plic_complete(plic, mctx, rec->irq);
+	rec->pending = 0;
+
+	plic_sec_dump_record("tee return -> complete", rec);
+
+	/* Avoid interrupt storm if OP-TEE doesn't clear device IRQ */
+	if (rec->count == 1) {
+		plic_enable_irq(plic, mctx, rec->irq, false);
+		sbi_printf("plic-sec: masked secure irq %u on mctx=%ld to stop storm\n",
+			   rec->irq, mctx);
+	}
 }
 
 void fdt_plic_priority_save(u8 *priority, u32 num)

@@ -10,6 +10,8 @@
 #include <libfdt.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/mpxy/fdt_mpxy.h>
+#include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
+#include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_console.h>
 
@@ -58,6 +60,27 @@ struct abi_entry_vectors *entry_vector_table = NULL;
 
 static char opteed_domain_name[64];
 static struct sbi_domain *tdomain, *udomain;
+
+bool opteed_entry_ready(void)
+{
+	return !!entry_vector_table;
+}
+
+struct sbi_domain *opteed_get_tdomain(void)
+{
+	return tdomain;
+}
+
+unsigned long opteed_get_fiq_entry(void)
+{
+	unsigned long base = (unsigned long)entry_vector_table;
+
+	if (!entry_vector_table)
+		return 0;
+
+	/* vector_fiq_entry is the 7th slot (index 6), each 4 bytes */
+	return base + 6 * 4;
+}
 
 static int opteed_domain_setup(void *fdt, int nodeoff, const struct fdt_match *match)
 {
@@ -167,6 +190,8 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 		}
 
 		sbi_ecall_tee_domain_exit();
+		/* Complete pending secure IRQ after returning from TEE */
+		fdt_plic_secure_irq_complete();
 	} else {
 		sbi_printf("%s: message id %d not supported by channel%d\n",
 			   __func__, msg_id, channel->channel_id);

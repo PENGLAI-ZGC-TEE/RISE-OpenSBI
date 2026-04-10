@@ -17,6 +17,7 @@
 #include <sbi/sbi_irqchip.h>
 #include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_trap.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/irqchip/fdt_irqchip.h>
 #include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
@@ -64,6 +65,24 @@ struct plic_secure_cfg {
 };
 
 static struct plic_secure_cfg plic_secure_cfg;
+
+static void plic_dump_trap_regs(const char *tag, struct sbi_scratch *scratch)
+{
+	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
+	struct sbi_trap_regs *regs = tcntx ? &tcntx->regs : NULL;
+
+	if (!regs) {
+		sbi_printf("plic-sec: %s trapctx=null\n", tag);
+		return;
+	}
+
+	sbi_printf("plic-sec: %s ra=0x%lx sp=0x%lx mepc=0x%lx mstatus=0x%lx\n",
+		   tag, regs->ra, regs->sp, regs->mepc, regs->mstatus);
+	sbi_printf("plic-sec: %s a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		   tag, regs->a0, regs->a1, regs->a2, regs->a3);
+	sbi_printf("plic-sec: %s a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		   tag, regs->a4, regs->a5, regs->a6, regs->a7);
+}
 
 static void plic_sec_dump_record(const char *tag,
 				    const struct plic_sec_irq_record *rec)
@@ -132,10 +151,18 @@ static int plic_secure_irqfn(void)
 
 	sbi_printf("plic-sec: enter tee fiq irq=%u entry=0x%lx\n",
 		   irq, fiq_entry);
-	sbi_domain_context_set_mepc(tdomain, fiq_entry);
+	plic_dump_trap_regs("pre-tee", scratch);
+	/*
+	 * opteed_get_fiq_entry() returns the FIQ slot in OP-TEE's jump table.
+	 * sbi_domain_context_set_mepc() stores entry_point - 4, which works
+	 * for ecall-driven entries but would land on the previous slot for
+	 * IRQ-driven FIQ entry. Add 4 here so the restored mepc points at
+	 * the actual FIQ jump slot.
+	 */
+	sbi_domain_context_set_mepc(tdomain, fiq_entry + 4);
 	sbi_domain_context_enter(tdomain);
 	if (rec)
-		plic_sec_dump_record("exit tee call", rec);
+		plic_sec_dump_record("tee context armed", rec);
 
 	return 0;
 }
@@ -162,13 +189,6 @@ void fdt_plic_secure_irq_complete(void)
 	rec->pending = 0;
 
 	plic_sec_dump_record("tee return -> complete", rec);
-
-	/* Avoid interrupt storm if OP-TEE doesn't clear device IRQ */
-	if (rec->count == 1) {
-		plic_enable_irq(plic, mctx, rec->irq, false);
-		sbi_printf("plic-sec: masked secure irq %u on mctx=%ld to stop storm\n",
-			   rec->irq, mctx);
-	}
 }
 
 void fdt_plic_priority_save(u8 *priority, u32 num)

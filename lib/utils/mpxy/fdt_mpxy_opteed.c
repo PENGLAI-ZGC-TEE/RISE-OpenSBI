@@ -14,6 +14,7 @@
 #include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_console.h>
+#include <sbi/sbi_trap.h>
 
 #if __riscv_xlen == 64
 #define SHMEM_PHYS_ADDR(_hi, _lo) (_lo)
@@ -57,9 +58,44 @@ struct abi_entry_vectors *entry_vector_table = NULL;
 
 /* Defined in optee_os/core/arch/riscv/include/tee/teeabi_opteed.h */
 #define TEEABI_OPTEED_RETURN_CALL_DONE 0xBE000000
+#define TEEABI_OPTEED_RETURN_FIQ_DONE  0xBE000006
 
 static char opteed_domain_name[64];
 static struct sbi_domain *tdomain, *udomain;
+
+static void opteed_dump_trap_regs(const char *tag)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
+	struct sbi_trap_regs *regs = tcntx ? &tcntx->regs : NULL;
+
+	if (!regs) {
+		sbi_printf("opteed-mpxy: %s trapctx=null\n", tag);
+		return;
+	}
+
+	sbi_printf("opteed-mpxy: %s ra=0x%lx sp=0x%lx mepc=0x%lx mstatus=0x%lx\n",
+		   tag, regs->ra, regs->sp, regs->mepc, regs->mstatus);
+	sbi_printf("opteed-mpxy: %s a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		   tag, regs->a0, regs->a1, regs->a2, regs->a3);
+	sbi_printf("opteed-mpxy: %s a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		   tag, regs->a4, regs->a5, regs->a6, regs->a7);
+}
+
+static void opteed_dump_smode_csrs(const char *tag)
+{
+	unsigned long sstatus = csr_read(CSR_SSTATUS);
+	unsigned long sie = csr_read(CSR_SIE);
+	unsigned long stvec = csr_read(CSR_STVEC);
+	unsigned long sscratch = csr_read(CSR_SSCRATCH);
+	unsigned long sepc = csr_read(CSR_SEPC);
+	unsigned long satp = csr_read(CSR_SATP);
+
+	sbi_printf("opteed-mpxy: %s sepc=0x%lx sstatus=0x%lx sie=0x%lx\n",
+		   tag, sepc, sstatus, sie);
+	sbi_printf("opteed-mpxy: %s sscratch=0x%lx satp=0x%lx stvec=0x%lx\n",
+		   tag, sscratch, satp, stvec);
+}
 
 bool opteed_entry_ready(void)
 {
@@ -170,6 +206,10 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 	} else if (msg_id == OPTEED_MSG_COMPLETE) {
 		/* Get per-hart MPXY share memory with udomain */
 		ms = hart_mpxy_state_get(udomain, hartidx);
+		sbi_printf("opteed-mpxy: COMPLETE func=0x%lx hart=%u\n",
+			   ((ulong *)msgbuf)[0], current_hartid());
+		opteed_dump_trap_regs("pre-exit");
+		opteed_dump_smode_csrs("pre-exit");
 
 		if(!IS_SHMEM_ADDR_VALID(ms)) {
 			if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_CALL_DONE) {
@@ -190,8 +230,15 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 		}
 
 		sbi_ecall_tee_domain_exit();
-		/* Complete pending secure IRQ after returning from TEE */
-		fdt_plic_secure_irq_complete();
+		opteed_dump_trap_regs("post-exit");
+		opteed_dump_smode_csrs("post-exit");
+		/*
+		 * Only FIQ return should complete the pending secure IRQ.
+		 * Normal OP-TEE call/return traffic also uses COMPLETE and
+		 * would otherwise spam misleading logs here.
+		 */
+		if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_FIQ_DONE)
+			fdt_plic_secure_irq_complete();
 	} else {
 		sbi_printf("%s: message id %d not supported by channel%d\n",
 			   __func__, msg_id, channel->channel_id);

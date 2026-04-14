@@ -70,18 +70,42 @@ static void plic_dump_trap_regs(const char *tag, struct sbi_scratch *scratch)
 {
 	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
 	struct sbi_trap_regs *regs = tcntx ? &tcntx->regs : NULL;
+	unsigned long mtvec, mscratch, mcause, mtval, mie, mip;
 
 	if (!regs) {
 		sbi_printf("plic-sec: %s trapctx=null\n", tag);
 		return;
 	}
 
-	sbi_printf("plic-sec: %s ra=0x%lx sp=0x%lx mepc=0x%lx mstatus=0x%lx\n",
-		   tag, regs->ra, regs->sp, regs->mepc, regs->mstatus);
+	mtvec = csr_read(CSR_MTVEC);
+	mscratch = csr_read(CSR_MSCRATCH);
+	mcause = csr_read(CSR_MCAUSE);
+	mtval = csr_read(CSR_MTVAL);
+	mie = csr_read(CSR_MIE);
+	mip = csr_read(CSR_MIP);
+
+	sbi_printf("plic-sec: %s ra=0x%lx sp=0x%lx gp=0x%lx tp=0x%lx\n",
+		   tag, regs->ra, regs->sp, regs->gp, regs->tp);
+	sbi_printf("plic-sec: %s t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx\n",
+		   tag, regs->t0, regs->t1, regs->t2, regs->t3);
+	sbi_printf("plic-sec: %s t4=0x%lx t5=0x%lx t6=0x%lx\n",
+		   tag, regs->t4, regs->t5, regs->t6);
+	sbi_printf("plic-sec: %s s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx\n",
+		   tag, regs->s0, regs->s1, regs->s2, regs->s3);
+	sbi_printf("plic-sec: %s s4=0x%lx s5=0x%lx s6=0x%lx s7=0x%lx\n",
+		   tag, regs->s4, regs->s5, regs->s6, regs->s7);
+	sbi_printf("plic-sec: %s s8=0x%lx s9=0x%lx s10=0x%lx s11=0x%lx\n",
+		   tag, regs->s8, regs->s9, regs->s10, regs->s11);
 	sbi_printf("plic-sec: %s a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
 		   tag, regs->a0, regs->a1, regs->a2, regs->a3);
 	sbi_printf("plic-sec: %s a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
 		   tag, regs->a4, regs->a5, regs->a6, regs->a7);
+	sbi_printf("plic-sec: %s mepc=0x%lx mstatus=0x%lx mtvec=0x%lx\n",
+		   tag, regs->mepc, regs->mstatus, mtvec);
+	sbi_printf("plic-sec: %s mscratch=0x%lx mcause=0x%lx mtval=0x%lx\n",
+		   tag, mscratch, mcause, mtval);
+	sbi_printf("plic-sec: %s mie=0x%lx mip=0x%lx\n",
+		   tag, mie, mip);
 }
 
 static void plic_sec_dump_record(const char *tag,
@@ -152,6 +176,12 @@ static int plic_secure_irqfn(void)
 	sbi_printf("plic-sec: enter tee fiq irq=%u entry=0x%lx\n",
 		   irq, fiq_entry);
 	plic_dump_trap_regs("pre-tee", scratch);
+	plic_set_world_state(plic, mctx, 1);
+	if (rec) {
+		rec->ws = plic_get_world_state(plic, mctx);
+		sbi_printf("plic-sec: switch ws -> %u before tee irq=%u mctx=%ld\n",
+			   rec->ws, irq, mctx);
+	}
 	/*
 	 * opteed_get_fiq_entry() returns the FIQ slot in OP-TEE's jump table.
 	 * sbi_domain_context_set_mepc() stores entry_point - 4, which works
@@ -187,8 +217,12 @@ void fdt_plic_secure_irq_complete(void)
 
 	plic_complete(plic, mctx, rec->irq);
 	rec->pending = 0;
+	plic_set_world_state(plic, mctx, 0);
+	rec->ws = plic_get_world_state(plic, mctx);
 
 	plic_sec_dump_record("tee return -> complete", rec);
+	sbi_printf("plic-sec: switch ws -> %u after tee irq=%u mctx=%ld\n",
+		   rec->ws, rec->irq, mctx);
 }
 
 void fdt_plic_priority_save(u8 *priority, u32 num)
@@ -240,6 +274,7 @@ static int irqchip_plic_warm_init(void)
 
 	/* Enable secure IRQs for M-mode context on this hart */
 	if (plic && plic_secure_cfg.irqs && plic_secure_cfg.count && mctx >= 0) {
+		plic_set_world_state(plic, mctx, 0);
 		for (u32 i = 0; i < plic_secure_cfg.count; i++)
 			plic_enable_irq(plic, mctx, plic_secure_cfg.irqs[i], true);
 		/* Allow all priorities in M-context */

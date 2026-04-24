@@ -12,6 +12,7 @@
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_mpxy.h>
+#include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
 
 static int sbi_ecall_mpxy_handler(unsigned long extid, unsigned long funcid,
 				  struct sbi_trap_regs *regs,
@@ -35,10 +36,14 @@ static int sbi_ecall_mpxy_handler(unsigned long extid, unsigned long funcid,
 	case SBI_EXT_MPXY_SEND_MSG_WITH_RESP:
 		ret = sbi_mpxy_send_message(regs->a0, regs->a1,
 					    regs->a2, &out->value);
+		if (opteed_consume_skip_regs_update())
+			out->skip_regs_update = true;
 		break;
 	case SBI_EXT_MPXY_SEND_MSG_NO_RESP:
 		ret = sbi_mpxy_send_message(regs->a0, regs->a1, regs->a2,
 					    NULL);
+		if (opteed_consume_skip_regs_update())
+			out->skip_regs_update = true;
 		break;
 	case SBI_EXT_MPXY_GET_NOTIFICATION_EVENTS:
 		ret = sbi_mpxy_get_notification_events(regs->a0, &out->value);

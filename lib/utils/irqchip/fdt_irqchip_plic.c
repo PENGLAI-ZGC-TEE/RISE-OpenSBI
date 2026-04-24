@@ -66,6 +66,18 @@ struct plic_secure_cfg {
 
 static struct plic_secure_cfg plic_secure_cfg;
 
+#define NANHU_TEST_NS44_TRIGGER_BASE	0x30002000UL
+#define NANHU_TEST_IRQ45_ID		45
+
+static void plic_maybe_trigger_ns44_test(u32 irq)
+{
+	if (irq != NANHU_TEST_IRQ45_ID)
+		return;
+
+	sbi_printf("plic-sec: test hook trigger ns irq44 while secure irq45 is active\n");
+	writel(1, (void *)NANHU_TEST_NS44_TRIGGER_BASE);
+}
+
 static void plic_dump_trap_regs(const char *tag, struct sbi_scratch *scratch)
 {
 	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
@@ -182,6 +194,7 @@ static int plic_secure_irqfn(void)
 		sbi_printf("plic-sec: switch ws -> %u before tee irq=%u mctx=%ld\n",
 			   rec->ws, irq, mctx);
 	}
+	plic_maybe_trigger_ns44_test(irq);
 	/*
 	 * opteed_get_fiq_entry() returns the FIQ slot in OP-TEE's jump table.
 	 * sbi_domain_context_set_mepc() stores entry_point - 4, which works

@@ -17,4 +17,10 @@ struct sbi_domain *opteed_get_tdomain(void);
 /* Return OP-TEE FIQ entry address, or 0 if unavailable */
 unsigned long opteed_get_fiq_entry(void);
 
+/*
+ * Return whether the current hart should skip the generic ecall register
+ * update on exit, and clear the one-shot request after consuming it.
+ */
+bool opteed_consume_skip_regs_update(void);
+
 #endif /* __SBI_UTILS_MPXY_FDT_MPXY_OPTEED_H__ */

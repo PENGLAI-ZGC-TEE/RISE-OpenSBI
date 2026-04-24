@@ -62,6 +62,7 @@ struct abi_entry_vectors *entry_vector_table = NULL;
 
 static char opteed_domain_name[64];
 static struct sbi_domain *tdomain, *udomain;
+static bool opteed_skip_regs_update[SBI_HARTMASK_MAX_BITS];
 
 static void opteed_dump_trap_regs(const char *tag)
 {
@@ -142,6 +143,20 @@ unsigned long opteed_get_fiq_entry(void)
 	return base + 6 * 4;
 }
 
+bool opteed_consume_skip_regs_update(void)
+{
+	u32 hartidx = current_hartindex();
+	bool skip;
+
+	if (hartidx >= SBI_HARTMASK_MAX_BITS)
+		return false;
+
+	skip = opteed_skip_regs_update[hartidx];
+	opteed_skip_regs_update[hartidx] = false;
+
+	return skip;
+}
+
 static int opteed_domain_setup(void *fdt, int nodeoff, const struct fdt_match *match)
 {
 	const u32 *prop_instance;
@@ -209,6 +224,9 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 	void *shmem_base;
 	u32 funcid_type;
 
+	if (hartidx < SBI_HARTMASK_MAX_BITS)
+		opteed_skip_regs_update[hartidx] = false;
+
 	if (msg_id == OPTEED_MSG_COMMUNICATE) {
 		/* Get per-hart MPXY share memory with tdomain */
 		ms = hart_mpxy_state_get(tdomain, hartidx);
@@ -254,6 +272,9 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 		}
 
 		sbi_ecall_tee_domain_exit();
+		if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_FIQ_DONE &&
+		    hartidx < SBI_HARTMASK_MAX_BITS)
+			opteed_skip_regs_update[hartidx] = true;
 		opteed_dump_trap_regs("post-exit");
 		opteed_dump_smode_csrs("post-exit");
 		/*

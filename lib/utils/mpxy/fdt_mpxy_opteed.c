@@ -14,7 +14,6 @@
 #include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_console.h>
-#include <sbi/sbi_trap.h>
 
 #if __riscv_xlen == 64
 #define SHMEM_PHYS_ADDR(_hi, _lo) (_lo)
@@ -63,64 +62,6 @@ struct abi_entry_vectors *entry_vector_table = NULL;
 static char opteed_domain_name[64];
 static struct sbi_domain *tdomain, *udomain;
 static bool opteed_skip_regs_update[SBI_HARTMASK_MAX_BITS];
-
-static void opteed_dump_trap_regs(const char *tag)
-{
-	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
-	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
-	struct sbi_trap_regs *regs = tcntx ? &tcntx->regs : NULL;
-	unsigned long mtvec, mscratch, mcause, mtval, mie, mip;
-
-	if (!regs) {
-		sbi_printf("opteed-mpxy: %s trapctx=null\n", tag);
-		return;
-	}
-
-	mtvec = csr_read(CSR_MTVEC);
-	mscratch = csr_read(CSR_MSCRATCH);
-	mcause = csr_read(CSR_MCAUSE);
-	mtval = csr_read(CSR_MTVAL);
-	mie = csr_read(CSR_MIE);
-	mip = csr_read(CSR_MIP);
-
-	sbi_printf("opteed-mpxy: %s ra=0x%lx sp=0x%lx gp=0x%lx tp=0x%lx\n",
-		   tag, regs->ra, regs->sp, regs->gp, regs->tp);
-	sbi_printf("opteed-mpxy: %s t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx\n",
-		   tag, regs->t0, regs->t1, regs->t2, regs->t3);
-	sbi_printf("opteed-mpxy: %s t4=0x%lx t5=0x%lx t6=0x%lx\n",
-		   tag, regs->t4, regs->t5, regs->t6);
-	sbi_printf("opteed-mpxy: %s s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx\n",
-		   tag, regs->s0, regs->s1, regs->s2, regs->s3);
-	sbi_printf("opteed-mpxy: %s s4=0x%lx s5=0x%lx s6=0x%lx s7=0x%lx\n",
-		   tag, regs->s4, regs->s5, regs->s6, regs->s7);
-	sbi_printf("opteed-mpxy: %s s8=0x%lx s9=0x%lx s10=0x%lx s11=0x%lx\n",
-		   tag, regs->s8, regs->s9, regs->s10, regs->s11);
-	sbi_printf("opteed-mpxy: %s a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-		   tag, regs->a0, regs->a1, regs->a2, regs->a3);
-	sbi_printf("opteed-mpxy: %s a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-		   tag, regs->a4, regs->a5, regs->a6, regs->a7);
-	sbi_printf("opteed-mpxy: %s mepc=0x%lx mstatus=0x%lx mtvec=0x%lx\n",
-		   tag, regs->mepc, regs->mstatus, mtvec);
-	sbi_printf("opteed-mpxy: %s mscratch=0x%lx mcause=0x%lx mtval=0x%lx\n",
-		   tag, mscratch, mcause, mtval);
-	sbi_printf("opteed-mpxy: %s mie=0x%lx mip=0x%lx\n",
-		   tag, mie, mip);
-}
-
-static void opteed_dump_smode_csrs(const char *tag)
-{
-	unsigned long sstatus = csr_read(CSR_SSTATUS);
-	unsigned long sie = csr_read(CSR_SIE);
-	unsigned long stvec = csr_read(CSR_STVEC);
-	unsigned long sscratch = csr_read(CSR_SSCRATCH);
-	unsigned long sepc = csr_read(CSR_SEPC);
-	unsigned long satp = csr_read(CSR_SATP);
-
-	sbi_printf("opteed-mpxy: %s sepc=0x%lx sstatus=0x%lx sie=0x%lx\n",
-		   tag, sepc, sstatus, sie);
-	sbi_printf("opteed-mpxy: %s sscratch=0x%lx satp=0x%lx stvec=0x%lx\n",
-		   tag, sscratch, satp, stvec);
-}
 
 bool opteed_entry_ready(void)
 {
@@ -203,6 +144,7 @@ static struct sbi_domain *__get_udomain(void)
 
 static int sbi_ecall_tee_domain_enter(unsigned long entry_point)
 {
+	fdt_plic_set_current_world_state(1);
 	sbi_domain_context_set_mepc(tdomain, entry_point);
 	sbi_domain_context_enter(tdomain);
 	return 0;
@@ -211,6 +153,7 @@ static int sbi_ecall_tee_domain_enter(unsigned long entry_point)
 static int sbi_ecall_tee_domain_exit(void)
 {
 	sbi_domain_context_exit();
+	fdt_plic_set_current_world_state(0);
 	return 0;
 }
 
@@ -248,10 +191,6 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 	} else if (msg_id == OPTEED_MSG_COMPLETE) {
 		/* Get per-hart MPXY share memory with udomain */
 		ms = hart_mpxy_state_get(udomain, hartidx);
-		sbi_printf("opteed-mpxy: COMPLETE func=0x%lx hart=%u\n",
-			   ((ulong *)msgbuf)[0], current_hartid());
-		opteed_dump_trap_regs("pre-exit");
-		opteed_dump_smode_csrs("pre-exit");
 
 		if(!IS_SHMEM_ADDR_VALID(ms)) {
 			if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_CALL_DONE) {
@@ -275,8 +214,6 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 		if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_FIQ_DONE &&
 		    hartidx < SBI_HARTMASK_MAX_BITS)
 			opteed_skip_regs_update[hartidx] = true;
-		opteed_dump_trap_regs("post-exit");
-		opteed_dump_smode_csrs("post-exit");
 		/*
 		 * Only FIQ return should complete the pending secure IRQ.
 		 * Normal OP-TEE call/return traffic also uses COMPLETE and

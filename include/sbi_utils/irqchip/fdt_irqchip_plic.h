@@ -33,4 +33,7 @@ void thead_plic_restore(void);
 /* Complete pending secure IRQ after returning from TEE */
 void fdt_plic_secure_irq_complete(void);
 
+/* Set current hart PLIC world_state for the M-mode context */
+void fdt_plic_set_current_world_state(u32 ws);
+
 #endif

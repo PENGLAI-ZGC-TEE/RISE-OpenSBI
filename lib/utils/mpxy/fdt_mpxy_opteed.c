@@ -13,6 +13,7 @@
 #include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
 #include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 #include <sbi/sbi_domain.h>
+#include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_console.h>
 
 #if __riscv_xlen == 64

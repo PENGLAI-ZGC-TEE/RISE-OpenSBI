@@ -17,6 +17,7 @@
 #include <sbi/sbi_irqchip.h>
 #include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_trap.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/irqchip/fdt_irqchip.h>
 #include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
@@ -77,6 +78,20 @@ static void plic_sec_dump_record(const char *tag,
 		   rec->mctx, rec->hartid);
 }
 
+static void plic_sec_trace_trap(const char *tag, u32 irq)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct sbi_trap_context *tcntx = sbi_trap_get_context(scratch);
+
+	if (!tcntx)
+		return;
+
+	sbi_printf("[SBI-TRAP] %s irq=%u mcause=0x%lx mtval=0x%lx mepc=0x%lx mstatus=0x%lx ra=0x%lx sp=0x%lx\n",
+		   tag, irq, tcntx->trap.cause, tcntx->trap.tval,
+		   tcntx->regs.mepc, tcntx->regs.mstatus,
+		   tcntx->regs.ra, tcntx->regs.sp);
+}
+
 static int plic_secure_irqfn(void)
 {
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
@@ -114,15 +129,21 @@ static int plic_secure_irqfn(void)
 	}
 
 	if (!sec) {
+		sbi_printf("[SBI-PLIC] DROP irq=%u sec=0 ws=%u owner=M\n", irq, ws);
 		sbi_printf("plic-sec: irq=%u not marked secure (ws=%u) -> complete\n",
 			   irq, ws);
 		plic_complete(plic, mctx, irq);
 		return SBI_ENOENT;
 	}
 
+	sbi_printf("[SBI-PLIC] CLAIM irq=%u sec=%u ws=%u mctx=%ld hart=%u\n",
+		   irq, sec, ws, mctx, hartid);
+	plic_sec_trace_trap("ENTER", irq);
+
 	tdomain = opteed_get_tdomain();
 	fiq_entry = opteed_get_fiq_entry();
 	if (!tdomain || !fiq_entry) {
+		sbi_printf("[SBI-PLIC] COMPLETE irq=%u reason=tee-not-ready\n", irq);
 		sbi_printf("plic-sec: OP-TEE not ready, complete irq=%u\n", irq);
 		if (rec)
 			rec->pending = 0;
@@ -130,6 +151,8 @@ static int plic_secure_irqfn(void)
 		return 0;
 	}
 
+	sbi_printf("[SBI-PLIC] RELAY irq=%u entry=0x%lx from=REE to=TEE-FIQ\n",
+		   irq, fiq_entry);
 	sbi_printf("plic-sec: enter tee fiq irq=%u entry=0x%lx\n",
 		   irq, fiq_entry);
 	plic_set_world_state(plic, mctx, 1);
@@ -145,8 +168,10 @@ static int plic_secure_irqfn(void)
 	 * IRQ-driven FIQ entry. Add 4 here so the restored mepc points at
 	 * the actual FIQ jump slot.
 	 */
+	sbi_domain_context_trace_set(true, "secure-irq-relay");
 	sbi_domain_context_set_mepc(tdomain, fiq_entry + 4);
 	sbi_domain_context_enter(tdomain);
+	plic_sec_trace_trap("EXIT", irq);
 	if (rec)
 		plic_sec_dump_record("tee context armed", rec);
 
@@ -168,6 +193,7 @@ void fdt_plic_secure_irq_complete(void)
 	rec = &sec_irq_records[hartindex];
 	if (!rec->pending) {
 		plic_sec_dump_record("complete called but not pending", rec);
+		sbi_domain_context_trace_set(false, NULL);
 		return;
 	}
 
@@ -176,9 +202,12 @@ void fdt_plic_secure_irq_complete(void)
 	plic_set_world_state(plic, mctx, 0);
 	rec->ws = plic_get_world_state(plic, mctx);
 
+	sbi_printf("[SBI-PLIC] COMPLETE irq=%u sec=%u ws=%u mctx=%ld hart=%u\n",
+		   rec->irq, rec->sec, rec->ws, mctx, hartid);
 	plic_sec_dump_record("tee return -> complete", rec);
 	sbi_printf("plic-sec: switch ws -> %u after tee irq=%u mctx=%ld\n",
 		   rec->ws, rec->irq, mctx);
+	sbi_domain_context_trace_set(false, NULL);
 }
 
 void fdt_plic_set_current_world_state(u32 ws)

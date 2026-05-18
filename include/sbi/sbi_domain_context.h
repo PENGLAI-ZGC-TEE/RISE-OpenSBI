@@ -38,6 +38,11 @@ int sbi_domain_context_enter(struct sbi_domain *dom);
  */
 int sbi_domain_context_exit(void);
 
+/* Enable concise per-hart context switch tracing for selected test paths. */
+void sbi_domain_context_trace_set(bool active, const char *reason);
+bool sbi_domain_context_trace_active(void);
+const char *sbi_domain_context_trace_reason(void);
+
 /**
  * Initialize domain context support
  *

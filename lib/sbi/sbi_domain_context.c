@@ -114,6 +114,43 @@ static void trace_regs(const char *tag, const char *reason,
 		   regs->t4, regs->t5, regs->t6);
 }
 
+static bool trace_regs_equal(const struct sbi_trap_regs *a,
+			     const struct sbi_trap_regs *b)
+{
+	if (!a || !b)
+		return false;
+
+	return a->zero == b->zero &&
+	       a->ra == b->ra && a->sp == b->sp &&
+	       a->gp == b->gp && a->tp == b->tp &&
+	       a->t0 == b->t0 && a->t1 == b->t1 && a->t2 == b->t2 &&
+	       a->s0 == b->s0 && a->s1 == b->s1 &&
+	       a->a0 == b->a0 && a->a1 == b->a1 &&
+	       a->a2 == b->a2 && a->a3 == b->a3 &&
+	       a->a4 == b->a4 && a->a5 == b->a5 &&
+	       a->a6 == b->a6 && a->a7 == b->a7 &&
+	       a->s2 == b->s2 && a->s3 == b->s3 &&
+	       a->s4 == b->s4 && a->s5 == b->s5 &&
+	       a->s6 == b->s6 && a->s7 == b->s7 &&
+	       a->s8 == b->s8 && a->s9 == b->s9 &&
+	       a->s10 == b->s10 && a->s11 == b->s11 &&
+	       a->t3 == b->t3 && a->t4 == b->t4 &&
+	       a->t5 == b->t5 && a->t6 == b->t6 &&
+	       a->mepc == b->mepc && a->mstatus == b->mstatus &&
+	       a->mstatusH == b->mstatusH;
+}
+
+static bool trace_trap_info_equal(const struct sbi_trap_info *a,
+				  const struct sbi_trap_info *b)
+{
+	if (!a || !b)
+		return false;
+
+	return a->cause == b->cause && a->tval == b->tval &&
+	       a->tval2 == b->tval2 && a->tinst == b->tinst &&
+	       a->gva == b->gva;
+}
+
 static unsigned long trace_read_scounteren(struct sbi_scratch *scratch)
 {
 	if (sbi_hart_priv_version(scratch) < SBI_HART_PRIV_VER_1_10)
@@ -128,6 +165,31 @@ static unsigned long trace_read_senvcfg(struct sbi_scratch *scratch)
 		return 0;
 
 	return csr_read(CSR_SENVCFG);
+}
+
+static bool trace_csr_equal(struct sbi_scratch *scratch,
+			    const struct hart_context *ctx)
+{
+	bool ok;
+
+	if (!ctx)
+		return false;
+
+	ok = csr_read(CSR_SSTATUS) == ctx->sstatus &&
+	     csr_read(CSR_SIE) == ctx->sie &&
+	     csr_read(CSR_STVEC) == ctx->stvec &&
+	     csr_read(CSR_SSCRATCH) == ctx->sscratch &&
+	     csr_read(CSR_SEPC) == ctx->sepc &&
+	     csr_read(CSR_SCAUSE) == ctx->scause &&
+	     csr_read(CSR_STVAL) == ctx->stval &&
+	     csr_read(CSR_SATP) == ctx->satp;
+
+	if (sbi_hart_priv_version(scratch) >= SBI_HART_PRIV_VER_1_10)
+		ok = ok && csr_read(CSR_SCOUNTEREN) == ctx->scounteren;
+	if (sbi_hart_priv_version(scratch) >= SBI_HART_PRIV_VER_1_12)
+		ok = ok && csr_read(CSR_SENVCFG) == ctx->senvcfg;
+
+	return ok;
 }
 
 static inline struct hart_context *hart_context_get(struct sbi_domain *dom,
@@ -173,10 +235,8 @@ static void switch_to_next_domain_context(struct hart_context *ctx,
 	unsigned int pmp_count = sbi_hart_pmp_count(scratch);
 	const char *reason = sbi_domain_context_trace_reason();
 	bool trace = sbi_domain_context_trace_active();
-	unsigned long exp_sstatus = dom_ctx->sstatus;
-	unsigned long exp_sepc = dom_ctx->sepc;
-	unsigned long exp_satp = dom_ctx->satp;
-	unsigned long exp_mepc = dom_ctx->trap_ctx.regs.mepc;
+	const struct sbi_trap_context *exp_trap_ctx = &dom_ctx->trap_ctx;
+	const struct sbi_trap_regs *exp_regs = &dom_ctx->trap_ctx.regs;
 
 	/* Assign current hart to target domain */
 	spin_lock(&current_dom->assigned_harts_lock);
@@ -230,10 +290,12 @@ static void switch_to_next_domain_context(struct hart_context *ctx,
 	sbi_memcpy(trap_ctx, &dom_ctx->trap_ctx, sizeof(*trap_ctx));
 
 	if (trace) {
-		bool ok = csr_read(CSR_SSTATUS) == exp_sstatus &&
-			  csr_read(CSR_SEPC) == exp_sepc &&
-			  csr_read(CSR_SATP) == exp_satp &&
-			  trap_ctx->regs.mepc == exp_mepc;
+		bool csr_ok = trace_csr_equal(scratch, dom_ctx);
+		bool regs_ok = trace_regs_equal(&trap_ctx->regs, exp_regs);
+		bool trap_ok = trace_trap_info_equal(&trap_ctx->trap,
+						     &exp_trap_ctx->trap) &&
+			       trap_ctx->prev_context ==
+			       exp_trap_ctx->prev_context;
 
 		sbi_printf("[SBI-DOM] RESTORE reason=%s target=%s sstatus=0x%lx sie=0x%lx stvec=0x%lx sscratch=0x%lx sepc=0x%lx scause=0x%lx stval=0x%lx satp=0x%lx scounteren=0x%lx senvcfg=0x%lx trap_mepc=0x%lx\n",
 			   reason, target_dom->name, csr_read(CSR_SSTATUS),
@@ -244,10 +306,28 @@ static void switch_to_next_domain_context(struct hart_context *ctx,
 			   trace_read_senvcfg(scratch), trap_ctx->regs.mepc);
 		trace_regs("RESTORE-REGS", reason, current_dom->name,
 			   target_dom->name, &trap_ctx->regs);
-		sbi_printf("[SBI-DOM] CHECK reason=%s restore=%s result=%s sepc=0x%lx sstatus=0x%lx satp=0x%lx trap_mepc=0x%lx\n",
-			   reason, target_dom->name, ok ? "OK" : "CHANGED",
-			   csr_read(CSR_SEPC), csr_read(CSR_SSTATUS),
-			   csr_read(CSR_SATP), trap_ctx->regs.mepc);
+		sbi_printf("[SBI-DOM] CHECK reason=%s restore=%s result=%s sstatus=0x%lx sie=0x%lx stvec=0x%lx sscratch=0x%lx sepc=0x%lx scause=0x%lx stval=0x%lx satp=0x%lx scounteren=0x%lx senvcfg=0x%lx\n",
+			   reason, target_dom->name,
+			   csr_ok ? "OK" : "CHANGED",
+			   csr_read(CSR_SSTATUS), csr_read(CSR_SIE),
+			   csr_read(CSR_STVEC), csr_read(CSR_SSCRATCH),
+			   csr_read(CSR_SEPC), csr_read(CSR_SCAUSE),
+			   csr_read(CSR_STVAL), csr_read(CSR_SATP),
+			   trace_read_scounteren(scratch),
+			   trace_read_senvcfg(scratch));
+		sbi_printf("[SBI-DOM] CHECK-REGS reason=%s restore=%s result=%s mepc=0x%lx mstatus=0x%lx ra=0x%lx sp=0x%lx gp=0x%lx tp=0x%lx\n",
+			   reason, target_dom->name,
+			   regs_ok ? "OK" : "CHANGED",
+			   trap_ctx->regs.mepc, trap_ctx->regs.mstatus,
+			   trap_ctx->regs.ra, trap_ctx->regs.sp,
+			   trap_ctx->regs.gp, trap_ctx->regs.tp);
+		sbi_printf("[SBI-DOM] CHECK-TRAP reason=%s restore=%s result=%s cause=0x%lx tval=0x%lx tval2=0x%lx tinst=0x%lx gva=0x%lx prev=0x%lx\n",
+			   reason, target_dom->name,
+			   trap_ok ? "OK" : "CHANGED",
+			   trap_ctx->trap.cause, trap_ctx->trap.tval,
+			   trap_ctx->trap.tval2, trap_ctx->trap.tinst,
+			   trap_ctx->trap.gva,
+			   (unsigned long)trap_ctx->prev_context);
 	}
 
 	/* Mark current context structure initialized because context saved */

@@ -12,10 +12,14 @@
 #include <sbi/riscv_io.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_heap.h>
+#include <sbi/sbi_irqchip.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_domain_context.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/irqchip/fdt_irqchip.h>
+#include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 #include <sbi_utils/irqchip/plic.h>
+#include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
 
 static unsigned long plic_ptr_offset;
 
@@ -40,6 +44,117 @@ static unsigned long plic_scontext_offset;
 
 #define plic_set_hart_scontext(__scratch, __sctx)			\
 	sbi_scratch_write_type((__scratch), long, plic_scontext_offset, (__sctx) + 1)
+
+struct plic_secure_config {
+	u32 *irqs;
+	u32 count;
+};
+
+struct plic_secure_irq_state {
+	u32 irq;
+	bool pending;
+};
+
+static struct plic_secure_config secure_config;
+static struct plic_secure_irq_state secure_irq_state[SBI_HARTMASK_MAX_BITS];
+
+static int plic_secure_irqfn(void)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct plic_data *plic = plic_get_hart_data_ptr(scratch);
+	struct plic_secure_irq_state *state;
+	struct sbi_domain *tdomain;
+	unsigned long fiq_entry;
+	long mctx = plic_get_hart_mcontext(scratch);
+	u32 hartindex = current_hartindex();
+	u32 irq;
+	int rc;
+
+	if (!plic || mctx < 0 || hartindex >= SBI_HARTMASK_MAX_BITS)
+		return SBI_ENODEV;
+
+	irq = plic_claim(plic, mctx);
+	if (!irq)
+		return SBI_ENOENT;
+
+	if (!plic_get_sec_src(plic, irq)) {
+		plic_complete(plic, mctx, irq, false);
+		return 0;
+	}
+
+	state = &secure_irq_state[hartindex];
+	if (state->pending) {
+		plic_complete(plic, mctx, irq, true);
+		return SBI_EALREADY;
+	}
+
+	state->irq = irq;
+	state->pending = true;
+	tdomain = opteed_get_tdomain();
+	fiq_entry = opteed_get_fiq_entry();
+	if (!tdomain || !fiq_entry) {
+		plic_complete(plic, mctx, irq, true);
+		state->pending = false;
+		return 0;
+	}
+
+	rc = fdt_plic_set_current_world_state(true);
+	if (rc)
+		goto fail_complete;
+
+	/* set_mepc() stores entry - 4; compensate for the FIQ vector slot. */
+	rc = sbi_domain_context_set_mepc(tdomain, fiq_entry + 4);
+	if (rc)
+		goto fail_restore_world;
+	rc = sbi_domain_context_enter(tdomain);
+	if (rc)
+		goto fail_restore_world;
+
+	return 0;
+
+fail_restore_world:
+	fdt_plic_set_current_world_state(false);
+fail_complete:
+	plic_complete(plic, mctx, irq, true);
+	state->pending = false;
+	return rc;
+}
+
+void fdt_plic_secure_irq_complete(void)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct plic_data *plic = plic_get_hart_data_ptr(scratch);
+	u32 hartindex = current_hartindex();
+	struct plic_secure_irq_state *state;
+	long mctx = plic_get_hart_mcontext(scratch);
+
+	if (!plic || mctx < 0 || hartindex >= SBI_HARTMASK_MAX_BITS)
+		return;
+
+	state = &secure_irq_state[hartindex];
+	if (state->pending) {
+		plic_complete(plic, mctx, state->irq, true);
+		state->pending = false;
+	}
+
+	fdt_plic_set_current_world_state(false);
+}
+
+int fdt_plic_set_current_world_state(bool tee_world)
+{
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct plic_data *plic = plic_get_hart_data_ptr(scratch);
+	long sctx = plic_get_hart_scontext(scratch);
+
+	if (!plic || !plic_secure_enabled(plic))
+		return 0;
+	if (tee_world && sctx >= 0) {
+		for (u32 i = 0; i < secure_config.count; i++)
+			plic_enable_irq(plic, sctx, secure_config.irqs[i], true);
+	}
+
+	return plic_set_world_state(plic, current_hartindex(), tee_world);
+}
 
 void fdt_plic_priority_save(u8 *priority, u32 num)
 {
@@ -79,10 +194,28 @@ void fdt_plic_context_restore(bool smode, const u32 *enable, u32 threshold,
 static int irqchip_plic_warm_init(void)
 {
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct plic_data *plic = plic_get_hart_data_ptr(scratch);
+	long mctx = plic_get_hart_mcontext(scratch);
+	int rc;
 
-	return plic_warm_irqchip_init(plic_get_hart_data_ptr(scratch),
-				      plic_get_hart_mcontext(scratch),
-				      plic_get_hart_scontext(scratch));
+	rc = plic_warm_irqchip_init(plic, mctx,
+				    plic_get_hart_scontext(scratch));
+	if (rc)
+		return rc;
+
+	if (!secure_config.count || mctx < 0)
+		return 0;
+
+	for (u32 i = 0; i < secure_config.count; i++)
+		plic_enable_irq(plic, mctx, secure_config.irqs[i], true);
+	plic_set_threshold(plic, mctx, 0);
+	if (plic_get_hart_scontext(scratch) >= 0) {
+		for (u32 i = 0; i < secure_config.count; i++)
+			plic_enable_irq(plic, plic_get_hart_scontext(scratch),
+					secure_config.irqs[i], true);
+	}
+
+	return plic_set_world_state(plic, current_hartindex(), true);
 }
 
 static int irqchip_plic_update_hartid_table(const void *fdt, int nodeoff,
@@ -137,6 +270,8 @@ static int irqchip_plic_cold_init(const void *fdt, int nodeoff,
 {
 	int rc;
 	struct plic_data *pd;
+	const fdt32_t *secure_irqs;
+	int secure_irqs_len;
 
 	if (!plic_ptr_offset) {
 		plic_ptr_offset = sbi_scratch_alloc_type_offset(void *);
@@ -177,7 +312,41 @@ static int irqchip_plic_cold_init(const void *fdt, int nodeoff,
 	if (rc)
 		goto fail_free_data;
 
+	secure_irqs = fdt_getprop(fdt, nodeoff, "riscv,secure-irqs",
+				  &secure_irqs_len);
+	if (secure_irqs && secure_irqs_len >= sizeof(*secure_irqs)) {
+		u32 count = secure_irqs_len / sizeof(*secure_irqs);
+
+		secure_config.irqs = sbi_zalloc(count * sizeof(*secure_config.irqs));
+		if (!secure_config.irqs) {
+			rc = SBI_ENOMEM;
+			goto fail_free_data;
+		}
+
+		for (u32 i = 0; i < count; i++) {
+			u32 irq = fdt32_to_cpu(secure_irqs[i]);
+
+			if (!irq || irq > pd->num_src)
+				continue;
+			secure_config.irqs[secure_config.count++] = irq;
+			plic_set_sec_src(pd, irq, true);
+			plic_set_priority(pd, irq, 1);
+		}
+	}
+
+	if (secure_config.count) {
+		rc = plic_secure_configure(pd, true, true);
+		if (rc)
+			goto fail_free_secure_config;
+		sbi_irqchip_set_irqfn(plic_secure_irqfn);
+	}
+
 	return 0;
+
+fail_free_secure_config:
+	sbi_free(secure_config.irqs);
+	secure_config.irqs = NULL;
+	secure_config.count = 0;
 
 fail_free_data:
 	sbi_free(pd);

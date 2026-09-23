@@ -12,6 +12,8 @@
 #include <sbi_utils/mpxy/fdt_mpxy.h>
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_console.h>
+#include <sbi_utils/irqchip/fdt_irqchip_plic.h>
+#include <sbi_utils/mpxy/fdt_mpxy_opteed.h>
 
 #if __riscv_xlen == 64
 #define SHMEM_PHYS_ADDR(_hi, _lo) (_lo)
@@ -54,10 +56,39 @@ struct abi_entry_vectors *entry_vector_table = NULL;
 					 FUNCID_TYPE_MASK)
 
 /* Defined in optee_os/core/arch/riscv/include/tee/teeabi_opteed.h */
-#define TEEABI_OPTEED_RETURN_CALL_DONE 0xBE000000
+#define TEEABI_OPTEED_RETURN_ENTRY_DONE 0xBE000000
+#define TEEABI_OPTEED_RETURN_FIQ_DONE   0xBE000006
 
 static char opteed_domain_name[64];
 static struct sbi_domain *tdomain, *udomain;
+static bool opteed_skip_regs_update[SBI_HARTMASK_MAX_BITS];
+
+struct sbi_domain *opteed_get_tdomain(void)
+{
+	return tdomain;
+}
+
+unsigned long opteed_get_fiq_entry(void)
+{
+	if (!entry_vector_table)
+		return 0;
+
+	/* vector_fiq_entry is slot 6 in OP-TEE's 4-byte jump table. */
+	return (unsigned long)entry_vector_table + 6 * sizeof(uint32_t);
+}
+
+bool opteed_consume_skip_regs_update(void)
+{
+	u32 hartidx = current_hartindex();
+	bool skip;
+
+	if (hartidx >= SBI_HARTMASK_MAX_BITS)
+		return false;
+
+	skip = opteed_skip_regs_update[hartidx];
+	opteed_skip_regs_update[hartidx] = false;
+	return skip;
+}
 
 static int opteed_domain_setup(void *fdt, int nodeoff, const struct fdt_match *match)
 {
@@ -105,15 +136,37 @@ static struct sbi_domain *__get_udomain(void)
 
 static int sbi_ecall_tee_domain_enter(unsigned long entry_point)
 {
-	sbi_domain_context_set_mepc(tdomain, entry_point);
-	sbi_domain_context_enter(tdomain);
+	int rc;
+
+	rc = fdt_plic_set_current_world_state(true);
+	if (rc)
+		return rc;
+	rc = sbi_domain_context_set_mepc(tdomain, entry_point);
+	if (rc)
+		goto restore_world;
+	rc = sbi_domain_context_enter(tdomain);
+	if (rc)
+		goto restore_world;
+
 	return 0;
+
+restore_world:
+	fdt_plic_set_current_world_state(false);
+	return rc;
 }
 
-static int sbi_ecall_tee_domain_exit(void)
+static int sbi_ecall_tee_domain_exit(bool fiq_done)
 {
-	sbi_domain_context_exit();
-	return 0;
+	int rc = sbi_domain_context_exit();
+
+	if (rc)
+		return rc;
+	if (fiq_done)
+		fdt_plic_secure_irq_complete();
+	else
+		rc = fdt_plic_set_current_world_state(false);
+
+	return rc;
 }
 
 static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
@@ -125,6 +178,11 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 	struct hart_mpxy_state *ms;
 	void *shmem_base;
 	u32 funcid_type;
+	bool fiq_done;
+	int rc;
+
+	if (hartidx < SBI_HARTMASK_MAX_BITS)
+		opteed_skip_regs_update[hartidx] = false;
 
 	if (msg_id == OPTEED_MSG_COMMUNICATE) {
 		/* Get per-hart MPXY share memory with tdomain */
@@ -141,15 +199,17 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 		sbi_memcpy(shmem_base, msgbuf, msg_len);
 
 		funcid_type = GET_ABI_ENTRY_TYPE(((ulong *)shmem_base)[0]);
-		sbi_ecall_tee_domain_enter((funcid_type == ABI_ENTRY_TYPE_FAST) ?
-					   (ulong)&entry_vector_table->fast_abi_entry :
-					   (ulong)&entry_vector_table->yield_abi_entry);
+		return sbi_ecall_tee_domain_enter(
+			(funcid_type == ABI_ENTRY_TYPE_FAST) ?
+			(ulong)&entry_vector_table->fast_abi_entry :
+			(ulong)&entry_vector_table->yield_abi_entry);
 	} else if (msg_id == OPTEED_MSG_COMPLETE) {
+		fiq_done = ((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_FIQ_DONE;
 		/* Get per-hart MPXY share memory with udomain */
 		ms = hart_mpxy_state_get(udomain, hartidx);
 
 		if(!IS_SHMEM_ADDR_VALID(ms)) {
-			if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_CALL_DONE) {
+			if (((ulong *)msgbuf)[0] == TEEABI_OPTEED_RETURN_ENTRY_DONE) {
 				/* RETURN_INIT_DONE */
 				entry_vector_table = (struct abi_entry_vectors *)(((ulong *)msgbuf)[1]);
 				sbi_printf("Registered OP-TEE entry table: %#lx\n", (ulong)entry_vector_table);
@@ -166,7 +226,11 @@ static int mpxy_opteed_send_message(struct sbi_mpxy_channel *channel,
 			*resp_len = msg_len - sizeof(ulong);
 		}
 
-		sbi_ecall_tee_domain_exit();
+		rc = sbi_ecall_tee_domain_exit(fiq_done);
+		if (rc)
+			return rc;
+		if (fiq_done && hartidx < SBI_HARTMASK_MAX_BITS)
+			opteed_skip_regs_update[hartidx] = true;
 	} else {
 		sbi_printf("%s: message id %d not supported by channel%d\n",
 			   __func__, msg_id, channel->channel_id);

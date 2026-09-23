@@ -28,6 +28,12 @@ void fdt_plic_context_save(bool smode, u32 *enable, u32 *threshold, u32 num);
 void fdt_plic_context_restore(bool smode, const u32 *enable, u32 threshold,
 			      u32 num);
 
+/* Synchronize the current hart's PLIC routing with the active S-world. */
+int fdt_plic_set_current_world_state(bool tee_world);
+
+/* Complete an M-context secure interrupt after OP-TEE returns from FIQ. */
+void fdt_plic_secure_irq_complete(void);
+
 void thead_plic_restore(void);
 
 #endif

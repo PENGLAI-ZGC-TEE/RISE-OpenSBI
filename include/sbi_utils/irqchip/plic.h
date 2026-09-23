@@ -38,4 +38,21 @@ int plic_warm_irqchip_init(const struct plic_data *plic,
 
 int plic_cold_irqchip_init(const struct plic_data *plic);
 
+void plic_set_priority(const struct plic_data *plic, u32 source, u32 val);
+void plic_set_threshold(const struct plic_data *plic, u32 context_id, u32 val);
+void plic_enable_irq(const struct plic_data *plic, u32 context_id,
+		     u32 irq, bool enable);
+u32 plic_claim(const struct plic_data *plic, u32 context_id);
+void plic_complete(const struct plic_data *plic, u32 context_id,
+		   u32 irq, bool secure);
+
+bool plic_get_sec_src(const struct plic_data *plic, u32 irq);
+void plic_set_sec_src(const struct plic_data *plic, u32 irq, bool secure);
+int plic_secure_configure(const struct plic_data *plic, bool enable,
+			  bool lock);
+bool plic_secure_enabled(const struct plic_data *plic);
+u32 plic_get_world_state(const struct plic_data *plic, u32 hart_index);
+int plic_set_world_state(const struct plic_data *plic, u32 hart_index,
+			 bool tee_world);
+
 #endif

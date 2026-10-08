@@ -252,7 +252,8 @@ bool plic_get_sec_src(const struct plic_data *plic, u32 irq)
 	if (!plic || !irq || irq > plic->num_src)
 		return false;
 
-	bit = irq - 1;
+	/* SEC_SRC is ID-indexed, like pending/enable; bit 0 is reserved. */
+	bit = irq;
 	reg = (char *)plic->addr + PLIC_SEC_SRC_BASE + 4 * (bit / 32);
 	value = readl(reg);
 	return !!(value & BIT(bit % 32));
@@ -266,7 +267,7 @@ void plic_set_sec_src(const struct plic_data *plic, u32 irq, bool secure)
 	if (!plic || !irq || irq > plic->num_src)
 		return;
 
-	bit = irq - 1;
+	bit = irq;
 	reg = (char *)plic->addr + PLIC_SEC_SRC_BASE + 4 * (bit / 32);
 	value = readl(reg);
 	if (secure)

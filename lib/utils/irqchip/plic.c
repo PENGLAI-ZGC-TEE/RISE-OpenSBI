@@ -10,6 +10,7 @@
 
 #include <sbi/riscv_io.h>
 #include <sbi/riscv_encoding.h>
+#include <sbi/riscv_asm.h>
 #include <sbi/sbi_bitops.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_domain.h>
@@ -29,14 +30,10 @@
 #define PLIC_SEC_CTRL_OFFSET 0x4100
 #define PLIC_WORLD_STATE_BASE 0x4200
 #define PLIC_WORLD_STATE_STRIDE 0x8
-#define PLIC_WS_ACK_BASE 0x4400
-#define PLIC_WS_ACK_STRIDE 0x8
 
 #define PLIC_SEC_CTRL_ENABLE BIT(0)
 #define PLIC_SEC_CTRL_LOCK BIT(1)
-#define PLIC_WS_ACK_DONE BIT(7)
 #define PLIC_COMPLETE_SECURE BIT(31)
-#define PLIC_WS_ACK_RETRIES 100000
 
 static u32 plic_get_priority(const struct plic_data *plic, u32 source)
 {
@@ -325,24 +322,16 @@ u32 plic_get_world_state(const struct plic_data *plic, u32 hart_index)
 int plic_set_world_state(const struct plic_data *plic, u32 hart_index,
 			 bool tee_world)
 {
-	u32 ack;
-	volatile void *state_reg, *ack_reg;
+	unsigned long mie;
 
 	if (!plic)
 		return SBI_EINVAL;
 
-	state_reg = (char *)plic->addr + PLIC_WORLD_STATE_BASE +
-		    PLIC_WORLD_STATE_STRIDE * hart_index;
-	ack_reg = (char *)plic->addr + PLIC_WS_ACK_BASE +
-		  PLIC_WS_ACK_STRIDE * hart_index;
-	writel(tee_world ? 1 : 0, state_reg);
+	(void)hart_index;
+	mie = csr_read_clear(CSR_MIE, MIP_MEIP);
+	csr_write(CSR_MWS, tee_world ? 1 : 0);
+	if (mie & MIP_MEIP)
+		csr_set(CSR_MIE, MIP_MEIP);
 
-	for (u32 i = 0; i < PLIC_WS_ACK_RETRIES; i++) {
-		ack = readl(ack_reg);
-		if ((ack & PLIC_WS_ACK_DONE) &&
-		    (!!(ack & 1) == tee_world))
-			return 0;
-	}
-
-	return SBI_ETIMEDOUT;
+	return 0;
 }

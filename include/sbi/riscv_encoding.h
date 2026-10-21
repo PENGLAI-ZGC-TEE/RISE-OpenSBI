@@ -464,6 +464,9 @@
 #define CSR_MCOUNTEREN			0x306
 #define CSR_MSTATUSH			0x310
 
+/* Nanhu V5 machine world state: 0 = REE, 1 = TEE. */
+#define CSR_MWS				0x3ff
+
 /* Machine Configuration */
 #define CSR_MENVCFG			0x30a
 #define CSR_MENVCFGH			0x31a

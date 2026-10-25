@@ -8,6 +8,7 @@ struct sbi_domain;
 
 struct sbi_domain *opteed_get_tdomain(void);
 unsigned long opteed_get_fiq_entry(void);
+unsigned long opteed_get_foreign_intr_entry(void);
 bool opteed_consume_skip_regs_update(void);
 
 #endif

@@ -77,6 +77,15 @@ unsigned long opteed_get_fiq_entry(void)
 	return (unsigned long)entry_vector_table + 6 * sizeof(uint32_t);
 }
 
+unsigned long opteed_get_foreign_intr_entry(void)
+{
+	if (!entry_vector_table)
+		return 0;
+
+	/* vector_foreign_intr_entry is slot 9 in OP-TEE's 4-byte jump table. */
+	return (unsigned long)entry_vector_table + 9 * sizeof(uint32_t);
+}
+
 bool opteed_consume_skip_regs_update(void)
 {
 	u32 hartidx = current_hartindex();

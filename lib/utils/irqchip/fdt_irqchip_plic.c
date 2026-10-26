@@ -121,13 +121,20 @@ static int plic_foreign_intr_preempt(struct sbi_scratch *scratch)
 	/*
 	 * Only preempt when OP-TEE is running a secure thread that can actually
 	 * be suspended:
-	 *   - any user-mode (TA) context is always suspendable, or
-	 *   - a kernel-mode context that had S-interrupts enabled, i.e. not on
-	 *     the temporary stack or inside a critical section.
+	 *   - OP-TEE explicitly unmasks foreign interrupts through sie.SEIE, and
+	 *   - a kernel-mode context has global S-interrupts enabled.
+	 *
+	 * OP-TEE keeps sie.SEIE masked while running a fast call, on a temporary
+	 * stack, in a critical section, or without an active secure thread. Checking
+	 * only mstatus.SIE is insufficient because those states can still have the
+	 * global S-mode interrupt bit set.
 	 * Otherwise defer: leave the source pending with MEIE masked; it is
 	 * delivered to Linux at the next transition to the REE world, which
 	 * matches the pre-existing "deferred to REE" behaviour.
 	 */
+	if (!(csr_read(CSR_SIE) & MIP_SEIP))
+		return 0;
+
 	prev_priv = (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT;
 	if (prev_priv == PRV_S && !(regs->mstatus & MSTATUS_SIE))
 		return 0;
